@@ -18,6 +18,75 @@ __device__ __forceinline__ void softmaxAggWarp(float& maxR, float& sumR){
 }
 
 
+__global__ void softmaxAggGlobal(const float* input, float* output, float* maxD, float* sumD, int N){
+    //*each block aggregates across 1 tile
+    int tid = threadIdx.x;
+    int bid = blockIdx.x * blockDim.x;
+
+    //shared mem
+    __shared__ float maxS = [THREADS_PER_BLOCK];
+    __shared__ float sumS = [THREADS_PER_BLOCK];
+
+    float maxV = 0.0f;
+    float sumV = 0.0f;
+
+    //*aggregate across tiles globally
+    // int blocksPerGrid = (N + TILE_SIZE - 1)/TILE_SIZE;
+    for (int i = tid; i < gridDim.x; i += blockDim.x){
+        float max2 = maxD[i];
+        float sum2 = sumD[i];
+
+        float newMaxV = fmaxf(maxV, max2);
+        sumV = __expf(maxV - newMaxV) * sumV + __expf(max2 - newMaxV) * sum2;
+        maxV = newMaxV;
+    }
+    maxS[tid] = maxV;
+    sumS[tid] = sumV;
+    __syncthreads();
+
+
+    //*tree reduction using shared mem from TILE_SIZE : 32
+    for (int i = THREADS_PER_BLOCK/2; i >= 32; i/=2){
+        if (tid < i){
+            float max1 = maxS[tid];
+            float max2 = maxS[tid + i];
+            float sum1 = sumS[tid];
+            float sum2 = sumS[tid + i];
+            
+            float newMaxV = fmaxf(max1, max2);
+            sumS[tid] = __expf(max1 - newMaxV) * sum1 + __expf(max2 - newMaxV) * sum2;
+            maxS[tid] = newMaxV;
+
+        }
+
+        __syncthreads();
+    }
+
+    //*reduction using warp registers from 32 on
+    //put in registers for warp reduction
+    float sumR = 0.0f;
+    float maxR = -INFINITY;
+    if (tid < 32){
+        maxR = maxS[tid];
+        sumR = sumS[tid];
+        softmaxAggWarp(maxR, sumR);
+    }
+    __syncthreads();
+    maxS[blockIdx.x] = maxR;
+    sumS[blockIdx.x] = sumR;
+
+    //0th element had the softmaxAggWarp agg
+    float maxG = maxS[0]
+    float sumG = sumS[0]
+
+    //*calculate per element softmax
+    for (int i = bid + tid; i < min(N, bid + TILE_SIZE); i += blockDim.x){
+        float val = input[i];
+        output[i] = __expf(val - maxG) / sumG;
+    }
+}
+
+
 __global__ void softmaxAggTile(const float* input, float* output, float* maxD, float* sumD, int N){
     //*each block aggregates across 1 tile
     int tid = threadIdx.x;
@@ -87,6 +156,8 @@ extern "C" void solve(const float* input, float* output, int N) {
     cudaMalloc(&sumD, sizeof(float) * blocksPerGrid);
 
     softmaxAggTile<<< blocksPerGrid, threadsPerBlock>>>(input, output, maxD, sumD, N);
+    
+    softmaxAggGlobal<<< blocksPerGrid, threadsPerBlock>>>(input, output, maxD, sumD, N);
 
     cudaFree(maxD);
     cudaFree(sumD);
