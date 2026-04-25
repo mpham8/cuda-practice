@@ -5,6 +5,19 @@ constexpr int THREADS_PER_BLOCK = 256;
 constexpr int TILE_SIZE = 2048;
 
 
+__device__ __forceinline__ void softmaxAggWarp(float& maxR, float& sumR){
+    unsigned int warpMask = 0xffff'ffffu;
+    for (int i = 16; i > 0; i/=2){
+        float maxR2 = __shfl_down_sync(warpMask, maxR, i);
+        float sumR2 = __shfl_down_sync(warpMask, sumR, i);
+        
+        float newMaxV = fmaxf(maxR, maxR2);
+        sumR = __expf(maxR - newMaxV) * sumR + __expf(maxR2 - newMaxV) * sumR2;
+        maxR = newMaxV;
+    }
+}
+
+
 __global__ void softmaxAggTile(const float* input, float* output, float* maxD, float* sumD, int N){
     //*each block aggregates across 1 tile
     int tid = threadIdx.x;
@@ -38,8 +51,8 @@ __global__ void softmaxAggTile(const float* input, float* output, float* maxD, f
             float sum2 = sumS[tid + i];
             
             float newMaxV = fmaxf(max1, max2);
-            sumS[tid] = __expf(max1 - newMaxV) * sum1 + __expf(max2 - newMaxV) * sum_val2;
-            sumS[tid] = newMaxV;
+            sumS[tid] = __expf(max1 - newMaxV) * sum1 + __expf(max2 - newMaxV) * sum2;
+            maxS[tid] = newMaxV;
 
         }
 
@@ -47,11 +60,14 @@ __global__ void softmaxAggTile(const float* input, float* output, float* maxD, f
     }
 
     //*reduction using warp registers from 32 on
-
     //put in registers for warp reduction
-    float maxR = maxS[tid];
-    float sumR = sumS[tid];
-    softmaxAggWarp(maxR, sumR);
+    float sumR = 0.0f;
+    float maxR = -INFINITY;
+    if (tid < 32){
+        maxR = maxS[tid];
+        sumR = sumS[tid];
+        softmaxAggWarp(maxR, sumR);
+    }
 
     if (threadIdx.x == 0){
         maxD[blockIdx.x] = maxR;
