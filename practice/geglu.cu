@@ -3,28 +3,24 @@
 
 //gated error gated linear unit (geglu)
 
-__device__ loadFloat4X1(){
-
+__device__ __forceinline__ float4 loadFloat4(const float* ptr){
+    return reinterpret_cast<const float4*>(ptr)[0];
 }
 
-__device__ loadFloat4X2(){
-
-}
-
-__device__ storeFloat4(){
-
+__device__ __forceinline__ void storeFloat4(float* ptr, const float4& x1){
+    reinterpret_cast<float4*>(ptr)[0] = x1;
 }
 
 __device__ __forceinline__ float geluFcn(const float x){
     return 0.5f * x * (1.0f + erff(x/sqrtf(2.0f)));
 }
 
-__global__ void solve(const float* input, float* output, int N){
+__global__ void gegluKernel(const float* input, float* output, int N){
     int idx = threadIdx.x + blockIdx.x * blockDim.x;
 
     if (idx * 8 + 7 < N){
-        float4 x1 = loadFloat4X1(input + 4*idx);
-        float4 x2 = loadFloat4X2(input + N/2 + 4*idx);
+        float4 x1 = loadFloat4(input + 4*idx);
+        float4 x2 = loadFloat4(input + N/2 + 4*idx);
 
         x1.x *= geluFcn(x2.x);
         x1.y *= geluFcn(x2.y);
@@ -49,6 +45,6 @@ extern "C" void solve(const float* input, float* output, int N){
     int indicesPerBlock = threadsPerBlock * 8;
     int blocksPerGrid = (N  + indicesPerBlock - 1) / indicesPerBlock;
 
-    solve<<<blocksPerGrid, threadsPerBlock>>>(input, output, N);
+    gegluKernel<<<blocksPerGrid, threadsPerBlock>>>(input, output, N);
     cudaDeviceSynchronize();
 }
