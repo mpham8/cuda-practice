@@ -1,7 +1,7 @@
 #include <cuda_runtime.h>
 
 #define STRIDE 4
-#define THREADS_PER_BLOCK 256
+#define THREADS_PER_BLOCK 512
 #define SHARED_MEM_SIZE (THREADS_PER_BLOCK/32)
 
 
@@ -27,33 +27,28 @@ __global__ void dotProduct(const float* A, const float* B, float* result, const 
 
     __shared__ float data_s[SHARED_MEM_SIZE];
 
-    //global stride 4 dot products
     float sum = 0.0f;
-    for (int i = idx * 4; i < N; i += blockDim.x * gridDim.x * 4){
-        if (i + 3 < N){
-            //convert to float 4 pointer
-            float4 a = loadFloat4(A + i);
-
-            float4 b = loadFloat4(B + i);
-
-            //dot the float4
-            sum += a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
-
-        } else {
-            for (int j = i; j < N; j++) sum += A[j] * B[j];
+    int i = idx * 4;
+    if (i + 3 < N) {
+        float4 a = loadFloat4(A + i);
+        float4 b = loadFloat4(B + i);
+        sum = a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+    } else if (i < N) {
+        for (int j = i; j < N; ++j) {
+            sum += A[j] * B[j];
         }
     }
 
     //reduction
 
-    //warp reduction 256 -> 8
+    //warp reduction 1024 -> 32
     sum = warpReduction(sum);
 
-    //put 8 into shared mem
+    //put into shared mem
     if (laneIdx == 0) data_s[warpIdx] = sum;
     __syncthreads();
 
-    //warp reduction 8->1
+    //warp reduction 32 -> 1
     sum = (laneIdx < SHARED_MEM_SIZE) ? data_s[laneIdx] : 0.0f;
     if (warpIdx == 0){
         sum = warpReduction(sum);
@@ -63,8 +58,8 @@ __global__ void dotProduct(const float* A, const float* B, float* result, const 
 
 // A, B, result are device pointers
 extern "C" void solve(const float* A, const float* B, float* result, int N) {
-    int loadsPerBlock = THREADS_PER_BLOCK * STRIDE * 4;
-    int blocksPerGrid = (N + loadsPerBlock - 1)/loadsPerBlock;
+    int elementsPerBlock = THREADS_PER_BLOCK * 4;
+    int blocksPerGrid = (N + elementsPerBlock - 1) / elementsPerBlock;
 
     dotProduct<<<blocksPerGrid, THREADS_PER_BLOCK>>>(A, B, result, N);
 }
