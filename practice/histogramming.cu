@@ -1,36 +1,52 @@
 #include <cuda_runtime.h>
 
 #define THREADS_PER_BLOCK 256
-#define THREADS_PER_BLOCK 256
 
 
 //load int4
-__global__ __inline__ int4 loadInt4(const int* ptr){
+__device__ __forceinline__ int4 loadInt4(const int* ptr){
     return reinterpret_cast<const int4*>(ptr)[0];
 }
 
 //reduction
-__global__ int histogram(const int* input, int* histogram, int N, int numBins) {
+__global__ void histogramKernel(const int* input, int* histogram, int N, int numBins) {
     int tId = threadIdx.x;
     int idx = blockDim.x * blockIdx.x + tId;
-    int warpId = tId \\ 32;
+    int warpId = tId / 32;
     
-    //init, zero out 8 shared mems
-    extern __shared__ int tileS[];
-    
+    //init, zero out 8 local copies in shared mem
+    int warps = THREADS_PER_BLOCK / 32;
+    int sharedMemSize = warps * numBins;
+    extern __shared__ int sharedMem[];
+    for (int i=tId; i<sharedMemSize; i+=THREADS_PER_BLOCK) sharedMem[i] = 0;
+    __syncthreads();
+
     //each thread loads int4 at a time
-    loadsPerThread = numBins \\ 32;
-    for (int i = 0; i<y; i+=x){
-        int4 v = loadInt4();
-        tileS[warpId * numBins + tId * i] = v.x;
-        tileS[warpId * numBins + tId * i + 1] = v.y;
-        tileS[warpId * numBins + tId * i + 2] = v.z;
-        tileS[warpId * numBins + tId * i + 3] = v.w;
+    for (int i = idx * 4; i < N; i += blockDim.x * gridDim.x * 4) {
+        if (i + 3 < N) {
+            int4 v = loadInt4(input + i);
+            atomicAdd(&sharedMem[warpId * numBins + v.x], 1);
+            atomicAdd(&sharedMem[warpId * numBins + v.y], 1);
+            atomicAdd(&sharedMem[warpId * numBins + v.z], 1);
+            atomicAdd(&sharedMem[warpId * numBins + v.w], 1);
+        } else {
+            for (int j = i; j < N; ++j) {
+                atomicAdd(&sharedMem[warpId * numBins + input[j]], 1);
+            }
+        }
     }
+    __syncthreads();
 
     //8 copies in shared mem -> 1 copy per block
-
-    //global atomic add
+    for (int i = tId; i < numBins; i += blockDim.x){
+        int sum = 0;
+        for (int j = 0; j < warps; j++){
+            sum += sharedMem[j * numBins + i];
+        }
+        //global atomic add
+        atomicAdd(&histogram[i], sum);
+    }
+    
 }
 
 
@@ -38,9 +54,9 @@ __global__ int histogram(const int* input, int* histogram, int N, int numBins) {
 extern "C" void solve(const int* input, int* histogram, int N, int num_bins) {
     int localCopiesPerBlock = THREADS_PER_BLOCK / 32;
     size_t sharedMemBytes = num_bins * localCopiesPerBlock * sizeof(int);
-    
-    // readsPerThread = 
-    // int blocksPerGrid = (N + THREADS_PER_BLOCK - 1
 
-    histogram<<<blocks, THREADS_PER_BLOCK, sharedMemBytes>>>(const int* input, int* histogram, int N, int numBins);
+    int elementsPerBlock = THREADS_PER_BLOCK * 4;
+    int blocksPerGrid = (N + elementsPerBlock - 1) / elementsPerBlock;
+
+    histogramKernel<<<blocksPerGrid, THREADS_PER_BLOCK, sharedMemBytes>>>(input, histogram, N, num_bins);
 }
